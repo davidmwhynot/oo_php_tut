@@ -67,126 +67,259 @@ END);
 // Output
 
 <?php
+// Tests
 
-// function logarr($arr) {
+try {
 
-// }
+// Object-relational mapping (ORM)
 
-class Model
-{
-	private $_pdo;
-	private $_schema;
-	private $_table;
-	private $_pk;
-
-	const INT_DATATYPES = array('int', 'tinyint', 'smallint', 'bigint');
-
-	function __construct($table)
+	class PrimaryKey
 	{
-		$this->_table = $table;
+		private $key;
+		private $value;
+		private $schema;
 
-		try {
-			$this->_pdo = new PDO('mysql:host=localhost;dbname=stariumxcv_dev', 'root', '');
+		public function __construct($schema, $value = null)
+		{
+			$this->schema = $schema;
+			$this->value = $value;
 
-			$query = $this->_pdo->prepare('SELECT * FROM information_schema.columns WHERE table_name = :table');
-			$query->execute([':table' => $table]);
-			$schema = $query->fetchAll(PDO::FETCH_ASSOC);
+			$this->key = $schema['COLUMN_NAME'];
+		}
 
+		public function __get($key)
+		{
+			if (property_exists($this, $key)) {
+				return $this->$key;
+			} else {
+				throw new Exception("Invalid property name for object of class PrimaryKey: $key.");
+			}
+		}
+
+		public function set($val)
+		{
+			$this->value = $val;
+		}
+
+		public function __toString()
+		{
+			return $this->value;
+		}
+
+	}
+
+	class Model
+	{
+		private $_pdo; // database connection object
+		private $_table; // name of the table that this model represents
+		private $_pk; // the table's primary key
+		private $_keys; // the names of the table's columns (not including the primary key's column's name)
+		private $_schema; // metadata for the table's columns
+		private $_pristine; // should mirror the values for this record that are currently stored in the database
+
+		const INT_DATATYPES = array('int', 'tinyint', 'smallint', 'bigint');
+
+		function __construct($table, $pk = false)
+		{
+			// initialize values
+			$this->_table = $table;
+			$this->_pk = null;
+			$this->_keys = array();
 			$this->_schema = array();
+			$this->_pristine = array();
 
-			foreach ($schema as $field) {
-				$key = $field['COLUMN_NAME'];
+			try {
+				// establish database connection
+				$this->_pdo = new PDO('mysql:host=localhost;dbname=stariumxcv_dev', 'root', '');
 
-				$this->$key = null;
-				$this->_schema[$key] = $field;
+				// get metadata for the table's columns
+				$query = $this->_pdo->prepare('SELECT * FROM information_schema.columns WHERE table_name = :table');
+				$query->execute([':table' => $table]);
+				$schema = $query->fetchAll(PDO::FETCH_ASSOC);
 
-				if ($field['COLUMN_KEY'] == 'PRI') {
-					$this->_pk = $key;
+				// set the model's properties based on the schema
+				foreach ($schema as $field) {
+					if ($field['COLUMN_KEY'] == 'PRI') {
+						$this->_pk = new PrimaryKey($field);
+					} else {
+						$key = $field['COLUMN_NAME'];
+
+						$this->$key = null;
+						$this->_schema[$key] = $field;
+					}
+				}
+
+				$this->_keys = array_keys($this->_schema);
+
+				$stmt = null;
+
+				if ($pk) {
+					// fetch the existing record if a primary key was provided and
+					// update the model's properties to refelect the new data
+					$fields = $this->get($pk);
+
+					foreach ($fields as $key => $val) {
+						$this->$key = $val;
+					}
+				}
+
+				// store the inital (unchanged) values for this record
+				foreach ($this->_keys as $key) {
+					$this->_pristine[$key] = $this->$key;
+				}
+
+			} catch (Exception $e) {
+				echo 'MODEL ERROR ' . $e->getCode() . ': ' . $e->getMessage() . '<br />';
+			}
+		}
+
+		function __destruct()
+		{
+			$this->_pdo = null;
+		}
+
+		// get a record
+		function get($pk)
+		{
+			$_pk = $this->_pk->key;
+
+			$query = $this->_pdo->prepare("SELECT * FROM $this->_table WHERE $_pk = :pk LIMIT 1");
+			$query->execute([':pk' => $pk]);
+
+			$results = $query->fetch(PDO::FETCH_ASSOC);
+
+			foreach ($results as $key => $val) {
+				if ($key == $_pk) {
+					$this->_pk->set($val);
+				} else {
+					$datatype = $this->_schema[$key]['DATA_TYPE'];
+
+					if (in_array($datatype, Model::INT_DATATYPES)) {
+						$results[$key] = (int) $val;
+					} else {
+						$results[$key] = $val;
+					}
 				}
 			}
 
-			$stmt = null;
-		} catch (Exception $e) {
-			echo 'MODEL ERROR ' . $e->getCode() . ': ' . $e->getMessage() . '<br />';
+			return $results;
 		}
-	}
 
-	function __destruct()
-	{
-		$this->_pdo = null;
-	}
+		function save()
+		{
+			$vals = array();
 
-	function get($pk)
-	{
-		$query = $this->_pdo->prepare("SELECT * FROM $this->_table WHERE $this->_pk = :pk LIMIT 1");
-		$query->execute([':pk' => $pk]);
+			foreach ($this->_keys as $key) {
+				if ($this->$key == null && $this->$key != 0 && $this->_schema[$key]['IS_NULLABLE'] == 'NO') {
+					echo $this->_schema[$key]['IS_NULLABLE'];
 
-		$results = $query->fetch(PDO::FETCH_ASSOC);
+					throw new Exception("Missing required field: " . $key);
+				}
 
-		foreach ($results as $key => $val) {
-			$datatype = $this->_schema[$key]['DATA_TYPE'];
+				array_push($vals, $this->$key);
+			}
 
-			if (in_array($datatype, Model::INT_DATATYPES)) {
-				$results[$key] = (int) $val;
+			if ($this->_pk->value == null) {
+				// primary key is null, so create a new record
+				$stmt = "INSERT INTO $this->_table (" . join(', ', $this->_keys) . ") VALUES (" . join(', ', array_fill(0, sizeof($vals), '?')) . ")";
+
+				$query = $this->_pdo->prepare($stmt);
+				$query->execute($vals);
 			} else {
-				$results[$key] = $val;
+				// primary key is not null, so update an existing record
+				$_pk = $this->_pk->key;
+
+				// determine which fields changed from their original values and only update those
+				$modified_keys_formatted = array();
+				$modified_values_formatted = array();
+
+				foreach ($this->_keys as $key) {
+					if ($this->_pristine[$key] != $this->$key) {
+						array_push($modified_keys_formatted, "$key = :$key");
+						$modified_values_formatted[":$key"] = $this->$key;
+					}
+				}
+
+				$stmt = "UPDATE $this->_table SET " . join(', ', $modified_keys_formatted) . " WHERE $_pk = :pk LIMIT 1";
+				$bind_params = array_merge($modified_values_formatted, [':pk' => $this->_pk->value]);
+
+				$query = $this->_pdo->prepare($stmt);
+				$query->execute($bind_params);
+
+				$result = $query->rowCount();
+
+				if ($result == 1) {
+					return true;
+				} else {
+					return false;
+				}
+			}
+
+		}
+
+		function __get($key)
+		{
+			if (property_exists($this, $key)) {
+				return $this->$key;
+			} else {
+				if ($key == $this->_pk->key) {
+					return $this->_pk->value;
+				} else {
+					return null;
+				}
 			}
 		}
 
-		return $results;
-	}
+		function __set($key, $val)
+		{
+			if ($key[0] != '_') {
+				$this->$key = $val;
+			} else {
+				throw new Exception("Cannot set protected property of Model: $key");
+			}
+		}
 
-	function __get($key)
-	{
-		if (property_exists($this, $key)) {
-			return $this->$key;
-		} else {
-			return null;
+		function dump()
+		{
+			return "pk: $this->_pk<br />" . json_encode(get_object_vars($this), JSON_PRETTY_PRINT);
+		}
+
+		function __toString()
+		{
+			return json_encode($this, JSON_PRETTY_PRINT);
 		}
 	}
 
-	function __set($key, $val)
-	{
-		$this->$key = $val;
-	}
+// class Federation extends Model
+	// {
+	// 	public function __construct($pk = false)
+	// 	{
+	// 		parent::__construct('federation');
+	// 	}
+	// }
 
-	function dump()
-	{
-		var_dump(get_object_vars($this));
+	$federation1 = new Model('federation', 1);
 
-		echo "<br />";
+	echo $federation1->fed_name;
+	echo '<br />';
+	$federation1->fed_name = "Test Fed 26";
+	echo $federation1->save() ? 'true' : 'false';
 
-		var_dump($this);
-	}
+	echo '<br />';
 
-	function __toString()
-	{
-		return json_encode(get_object_vars($this), JSON_PRETTY_PRINT);
-		// return json_encode($this, JSON_PRETTY_PRINT);
-	}
+	$federation23 = new Model('federation', 1);
+	echo $federation23->fed_name;
+
+	echo '<br /><br />"$federation1->dump()" output:<br />';
+	echo $federation1->dump();
+
+} catch (Exception $e) {
+	echo 'ERROR ' . $e->getCode() . ': ' . $e->getMessage() . '<br />';
+	echo '<br /><br />"$federation1->dump()" output:<br />';
+	echo $federation1->dump();
+
+	throw $e;
 }
-
-class Federation extends Model
-{
-	public function __construct($pk)
-	{
-		parent::__construct('federation');
-
-		$fields = parent::get($pk);
-
-		// echo json_encode($fields, JSON_PRETTY_PRINT);
-
-		foreach ($fields as $key => $val) {
-			$this->$key = $val;
-		}
-	}
-}
-
-$federation = new Federation(1);
-
-// $federation->dump();
-
-echo $federation;
 
 ?>
 
