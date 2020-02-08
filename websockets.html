@@ -1,0 +1,21 @@
+<html>
+	<body>
+		<div id="root"></div>
+		<script>
+			var host = 'ws://0.0.0.0:12345/websockets.php';
+			var socket = new WebSocket(host);
+			socket.onmessage = function(e) {
+				document.getElementById('root').innerHTML = e.data;
+			};
+
+			socket.onopen = () => {
+				console.log(socket);
+				setInterval(() => {
+					console.log('sending');
+					socket.send('a');
+					// socket.send(btoa('a'));
+				}, 2000);
+			};
+		</script>
+	</body>
+</html>
