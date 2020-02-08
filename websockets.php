@@ -1,65 +1,139 @@
 <?php
+// /Code by: Nabi KAZ <www.nabi.ir>
 
-$address = '0.0.0.0';
+// set some variables
+$host = "0.0.0.0";
 $port = 12345;
 
-// Create WebSocket.
-$server = socket_create(AF_INET, SOCK_STREAM, SOL_TCP);
-socket_set_option($server, SOL_SOCKET, SO_REUSEADDR, 1);
-socket_bind($server, $address, $port);
-socket_listen($server);
-$client = socket_accept($server);
+// don't timeout!
+set_time_limit(0);
 
-// Send WebSocket handshake headers.
-$request = socket_read($client, 5000);
-preg_match('#Sec-WebSocket-Key: (.*)\r\n#', $request, $matches);
-$key = base64_encode(pack(
-	'H*',
-	sha1($matches[1] . '258EAFA5-E914-47DA-95CA-C5AB0DC85B11')
-));
-$headers = "HTTP/1.1 101 Switching Protocols\r\n";
-$headers .= "Upgrade: websocket\r\n";
-$headers .= "Connection: Upgrade\r\n";
-$headers .= "Sec-WebSocket-Version: 13\r\n";
-$headers .= "Sec-WebSocket-Accept: $key\r\n\r\n";
-socket_write($client, $headers, strlen($headers));
+// create socket
+$socket = socket_create(AF_INET, SOCK_STREAM, 0) or die("Could not create socket\n");
 
-// Send messages into WebSocket in a loop.
-while (true) {
-	sleep(1);
-	echo "sending" . PHP_EOL;
-	$content = 'Now: ' . time();
-	$response = chr(129) . chr(strlen($content)) . $content;
-	socket_write($client, $response);
+// bind socket to port
+$result = socket_bind($socket, $host, $port) or die("Could not bind to socket\n");
 
-	$input = socket_read($client, 64, PHP_NORMAL_READ);
-	// $input = socket_read($client, 64, PHP_NORMAL_READ);
+// start listening for connections
+$result = socket_listen($socket, 20) or die("Could not set up socket listener\n");
 
-	// In most cases, error produces an empty string and not FALSE
-	if ($input === false || strcmp($input, '') == 0) {
-		$code = socket_last_error($client);
-
-		// You MUST clear the error, or it will not change on next read
-		socket_clear_error($client);
-
-		if ($code == SOCKET_EAGAIN) {
-			// Nothing to read from non-blocking socket, try again later...
-			echo "nothing to read" . PHP_EOL;
-		} else {
-			// Connection most likely closed, especially if $code is '0'
-			echo "connection closed... code: $code" . PHP_EOL;
-		}
-	} else {
-		// Deal with the data
-		echo "raw input:" . PHP_EOL;
-		echo $input;
-		echo PHP_EOL . "chr input:" . PHP_EOL;
-		echo chr(129) . $input;
-		echo PHP_EOL . "input:" . PHP_EOL;
-		var_dump($input);
-		echo PHP_EOL . "chr(129) . input:" . PHP_EOL;
-		var_dump(chr(129) . $input);
-		echo PHP_EOL;
+$flag_handshake = false;
+$client = null;
+do {
+	if (!$client) {
+		// accept incoming connections
+		// client another socket to handle communication
+		$client = socket_accept($socket) or die("Could not accept incoming connection\n");
 	}
 
+	$bytes = @socket_recv($client, $data, 2048, 0);
+	if ($flag_handshake == false) {
+		if ((int) $bytes == 0) {
+			continue;
+		}
+
+		print("Handshaking headers from client:\n" . $data . "\n");
+		if (handshake($client, $data, $socket)) {
+			$flag_handshake = true;
+		}
+	} elseif ($flag_handshake == true) {
+		if ($data != "") {
+			$decoded_data = unmask($data);
+			print("< " . $decoded_data . "\n");
+			$response = 'Now: ' . time();
+			socket_write($client, encode($response));
+			print("> " . $response . "\n");
+			// socket_close($client);
+			// $client = null;
+			// $flag_handshake = false;
+		}
+	}
+} while (true);
+
+// close sockets
+socket_close($client);
+socket_close($socket);
+
+function handshake($client, $headers, $socket)
+{
+
+	if (preg_match("/Sec-WebSocket-Version: (.*)\r\n/", $headers, $match)) {
+		$version = $match[1];
+	} else {
+		print("The client doesn't support WebSocket");
+		return false;
+	}
+
+	if ($version == 13) {
+		// Extract header variables
+		if (preg_match("/GET (.*) HTTP/", $headers, $match)) {
+			$root = $match[1];
+		}
+
+		if (preg_match("/Host: (.*)\r\n/", $headers, $match)) {
+			$host = $match[1];
+		}
+
+		if (preg_match("/Origin: (.*)\r\n/", $headers, $match)) {
+			$origin = $match[1];
+		}
+
+		if (preg_match("/Sec-WebSocket-Key: (.*)\r\n/", $headers, $match)) {
+			$key = $match[1];
+		}
+
+		$acceptKey = $key . '258EAFA5-E914-47DA-95CA-C5AB0DC85B11';
+		$acceptKey = base64_encode(sha1($acceptKey, true));
+
+		$upgrade = "HTTP/1.1 101 Switching Protocols\r\n" .
+			"Upgrade: websocket\r\n" .
+			"Connection: Upgrade\r\n" .
+			"Sec-WebSocket-Accept: $acceptKey" .
+			"\r\n\r\n";
+
+		socket_write($client, $upgrade);
+		return true;
+	} else {
+		print("WebSocket version 13 required (the client supports version {$version})");
+		return false;
+	}
+}
+
+function unmask($payload)
+{
+	$length = ord($payload[1]) & 127;
+
+	if ($length == 126) {
+		$masks = substr($payload, 4, 4);
+		$data = substr($payload, 8);
+	} elseif ($length == 127) {
+		$masks = substr($payload, 10, 4);
+		$data = substr($payload, 14);
+	} else {
+		$masks = substr($payload, 2, 4);
+		$data = substr($payload, 6);
+	}
+
+	$text = '';
+	for ($i = 0; $i < strlen($data); ++$i) {
+		$text .= $data[$i] ^ $masks[$i % 4];
+	}
+	return $text;
+}
+
+function encode($text)
+{
+	// 0x1 text frame (FIN + opcode)
+	$b1 = 0x80 | (0x1 & 0x0f);
+	$length = strlen($text);
+
+	if ($length <= 125) {
+		$header = pack('CC', $b1, $length);
+	} elseif ($length > 125 && $length < 65536) {
+		$header = pack('CCS', $b1, 126, $length);
+	} elseif ($length >= 65536) {
+		$header = pack('CCN', $b1, 127, $length);
+	}
+
+	return $header . $text;
 }

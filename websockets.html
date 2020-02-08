@@ -10,11 +10,12 @@
 
 			socket.onopen = () => {
 				console.log(socket);
+				// socket.close();
 				setInterval(() => {
 					console.log('sending');
-					socket.send('a');
+					socket.send(Math.random());
 					// socket.send(btoa('a'));
-				}, 2000);
+				}, 100);
 			};
 		</script>
 	</body>
